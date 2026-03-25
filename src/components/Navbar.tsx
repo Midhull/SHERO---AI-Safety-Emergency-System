@@ -15,15 +15,16 @@ const Navbar = () => {
     { to: "/how-to-use", label: "How to Use" },
   ];
 
-  const authLinks = [
-    { to: "/dashboard", label: "Dashboard" },
-    { to: "/contacts", label: "Contacts" },
-    { to: "/timer", label: "Timer" },
-    { to: "/map", label: "Map" },
-    { to: "/admin", label: "Admin HQ" },
-  ];
-
-  const links = user ? [...publicLinks, ...authLinks] : publicLinks;
+  const links = user 
+    ? [
+        ...publicLinks, 
+        { to: "/dashboard", label: "Dashboard" },
+        { to: "/contacts", label: "Contacts" },
+        { to: "/timer", label: "Timer" },
+        { to: "/map", label: "Map" },
+        ...(user.email === "admin@shero.com" ? [{ to: "/admin", label: "Admin HQ" }] : [])
+      ] 
+    : publicLinks;
 
   const isActive = (path: string) => location.pathname === path;
 

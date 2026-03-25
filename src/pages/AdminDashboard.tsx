@@ -169,12 +169,12 @@ const AdminDashboard = () => {
                         </h1>
                         <p className="text-muted-foreground mt-2 text-lg">Central hub for tracking safety and system health.</p>
                     </motion.div>
-                    <div className="flex gap-2 bg-secondary/50 p-1 rounded-xl glass border-border">
-                        {["overview", "map", "analytics"].map((tab) => (
+                    <div className="flex gap-2 bg-secondary/50 p-1 rounded-xl glass border-border overflow-x-auto">
+                        {["overview", "users", "map", "analytics"].map((tab) => (
                             <button
                                 key={tab}
                                 onClick={() => setActiveTab(tab)}
-                                className={`px-4 py-2 rounded-lg font-medium text-sm transition ${activeTab === tab ? "bg-primary text-white shadow-lg" : "hover:bg-black/10 dark:hover:bg-white/10"}`}
+                                className={`px-4 py-2 rounded-lg font-medium text-sm transition whitespace-nowrap ${activeTab === tab ? "bg-primary text-white shadow-lg" : "hover:bg-black/10 dark:hover:bg-white/10"}`}
                             >
                                 {tab.charAt(0).toUpperCase() + tab.slice(1)}
                             </button>
@@ -191,6 +191,7 @@ const AdminDashboard = () => {
                     className="w-full flex flex-col gap-6"
                 >
                     {activeTab === "overview" && <OverviewTab />}
+                    {activeTab === "users" && <UsersTab />}
                     {activeTab === "map" && <MapTab />}
                     {activeTab === "analytics" && <AnalyticsTab />}
                 </motion.div>
@@ -200,43 +201,73 @@ const AdminDashboard = () => {
     );
 };
 
+import { supabase } from "@/lib/supabase";
+
 const OverviewTab = () => {
-    const [stats, setStats] = useState({ activeSOS: 0, usersOnline: 1, health: 100, zones: 142 });
+    const [stats, setStats] = useState({ activeSOS: 0, usersOnline: 0, health: 100, zones: 142 });
     const [incidents, setIncidents] = useState<any[]>([]);
     const [resolved, setResolved] = useState<any[]>([]);
     const [viewingIncident, setViewingIncident] = useState<any>(null);
 
+    const fetchInitialData = async () => {
+        // Fetch active incidents (created in last 24h or status active)
+        const { data, error } = await supabase
+            .from('incidents')
+            .select('*')
+            .eq('status', 'active')
+            .order('updated_at', { ascending: false });
+
+        if (!error && data) {
+            setIncidents(data.map(d => ({
+                id: d.id,
+                text: d.is_emergency ? "REAL TIME SOS ACTIVATED" : "Active Location Tracking",
+                time: "LIVE",
+                user: d.user_id.substring(0, 8),
+                isReal: d.is_emergency
+            })));
+            setStats(prev => ({ ...prev, activeSOS: data.filter(i => i.is_emergency).length, usersOnline: data.length }));
+        }
+    };
+
     useEffect(() => {
+        fetchInitialData();
 
-        const checkSOS = () => {
-            const raw = localStorage.getItem("shero_active_sos");
-            if (raw) {
-                try {
-                    const data = JSON.parse(raw);
-                    if (data.active) {
-                        setStats(prev => ({ ...prev, activeSOS: prev.activeSOS + 1 }));
-                        setIncidents(prev => {
-                            // Don't duplicate real incident if already at top
-                            if (prev.length > 0 && prev[0].isReal) return prev;
-                            const newIncident = {
-                                id: Date.now(),
-                                text: "REAL TIME SOS ACTIVATED - Current User",
-                                time: "LIVE",
-                                user: "ME",
-                                isReal: true
-                            };
-                            return [newIncident, ...prev].slice(0, 4);
-                        });
-                    }
-                } catch (e) { }
-            }
-        };
+        // Real-time channel for incidents
+        const channel = supabase
+            .channel('live-incidents')
+            .on('postgres_changes', { 
+                event: '*', 
+                schema: 'public', 
+                table: 'incidents' 
+            }, (payload) => {
+                console.log("Real-time update:", payload);
+                if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+                    const newIncident = payload.new as any;
+                    
+                    setIncidents(prev => {
+                        const exists = prev.find(i => i.user === newIncident.user_id.substring(0, 8));
+                        const incidentObj = {
+                            id: newIncident.id,
+                            text: newIncident.is_emergency ? "REAL TIME SOS ACTIVATED" : "Active Location Tracking",
+                            time: "LIVE",
+                            user: newIncident.user_id.substring(0, 8),
+                            isReal: newIncident.is_emergency
+                        };
 
-        window.addEventListener("storage", checkSOS);
-        checkSOS(); // Check initially
+                        if (exists) {
+                            return prev.map(i => i.user === incidentObj.user ? incidentObj : i);
+                        }
+                        return [incidentObj, ...prev].slice(0, 10);
+                    });
+
+                    // Update stats
+                    fetchInitialData();
+                }
+            })
+            .subscribe();
 
         return () => {
-            window.removeEventListener("storage", checkSOS);
+            supabase.removeChannel(channel);
         };
     }, []);
 
@@ -452,5 +483,84 @@ const AnalyticsTab = () => (
         </div>
     </div>
 );
+
+const UsersTab = () => {
+    const [users, setUsers] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    const fetchUsers = async () => {
+        setLoading(true);
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .order('updated_at', { ascending: false });
+
+        if (!error && data) {
+            setUsers(data);
+        }
+        setLoading(false);
+    };
+
+    useEffect(() => {
+        fetchUsers();
+    }, []);
+
+    return (
+        <div className="space-y-6">
+            <div className="flex justify-between items-center">
+                <h2 className="font-display font-semibold text-2xl flex items-center gap-2">
+                    <Users className="text-primary" /> Registered Users
+                </h2>
+                <button
+                    onClick={fetchUsers}
+                    className="p-2 hover:bg-white/10 rounded-full transition"
+                    title="Refresh List"
+                >
+                    <Activity className={`h-5 w-5 ${loading ? 'animate-spin' : ''}`} />
+                </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {users.length === 0 && !loading ? (
+                    <div className="col-span-full p-20 text-center glass rounded-3xl border-2 border-dashed">
+                        <Users className="h-12 w-12 text-muted-foreground mx-auto mb-4 opacity-20" />
+                        <p className="text-muted-foreground">No users found in database.</p>
+                    </div>
+                ) : (
+                    users.map((u) => (
+                        <motion.div
+                            key={u.id}
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="glass p-5 rounded-2xl border border-border/50 flex flex-col gap-4 hover:border-primary/30 transition shadow-sm"
+                        >
+                            <div className="flex items-center gap-4">
+                                <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center text-xl font-bold text-primary">
+                                    {u.full_name?.charAt(0) || "U"}
+                                </div>
+                                <div className="overflow-hidden">
+                                    <h3 className="font-semibold text-lg truncate">{u.full_name || "Anonymous User"}</h3>
+                                    <p className="text-xs text-muted-foreground font-mono truncate">ID: {u.id}</p>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div className="p-3 bg-secondary/30 rounded-xl">
+                                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Safety PIN</p>
+                                    <p className="font-mono font-bold text-primary">{u.safety_pin || "----"}</p>
+                                </div>
+                                <div className="p-3 bg-secondary/30 rounded-xl">
+                                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Status</p>
+                                    <p className="text-xs font-semibold text-safe flex items-center gap-1">
+                                        <div className="h-2 w-2 rounded-full bg-safe animate-pulse" /> Verified
+                                    </p>
+                                </div>
+                            </div>
+                        </motion.div>
+                    ))
+                )}
+            </div>
+        </div>
+    );
+};
 
 export default AdminDashboard;

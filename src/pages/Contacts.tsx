@@ -1,18 +1,21 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Users, AlertTriangle, Star, MessageCircle, Phone, Smartphone, Plus } from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/hooks/useAuth";
+import { toast } from "sonner";
 
 interface Contact {
     id: string;
+    user_id?: string;
     name: string;
     phone: string;
     priority: "High" | "Medium" | "Low";
 }
 
 const defaultContacts: Contact[] = [
-    { id: "1", name: "Mom", phone: "+1 234 567 8901", priority: "High" },
-    { id: "2", name: "Dad", phone: "+1 234 567 8902", priority: "High" },
-    { id: "3", name: "Sarah (Sister)", phone: "+1 987 654 3210", priority: "Medium" }
+    { id: "1", name: "Mom (Demo)", phone: "+1 234 567 8901", priority: "High" },
+    { id: "2", name: "Dad (Demo)", phone: "+1 234 567 8902", priority: "High" },
 ];
 
 const PriorityBadge = ({ priority }: { priority: string }) => {
@@ -29,10 +32,9 @@ const PriorityBadge = ({ priority }: { priority: string }) => {
 };
 
 const Contacts = () => {
-    const [contacts, setContacts] = useState<Contact[]>(() => {
-        const saved = localStorage.getItem("shero_contacts");
-        return saved ? JSON.parse(saved) : defaultContacts;
-    });
+    const { user } = useAuth();
+    const [contacts, setContacts] = useState<Contact[]>([]);
+    const [loading, setLoading] = useState(true);
     const [notifying, setNotifying] = useState<string | null>(null);
     const [isAdding, setIsAdding] = useState(false);
 
@@ -41,37 +43,105 @@ const Contacts = () => {
     const [newPhone, setNewPhone] = useState("");
     const [newPriority, setNewPriority] = useState<"High" | "Medium" | "Low">("Medium");
 
-    const saveContacts = (newContacts: Contact[]) => {
-        setContacts(newContacts);
-        localStorage.setItem("shero_contacts", JSON.stringify(newContacts));
+    const fetchContacts = async () => {
+        if (!user) {
+            setContacts(defaultContacts);
+            setLoading(false);
+            return;
+        }
+
+        const { data, error } = await supabase
+            .from('contacts')
+            .select('*')
+            .eq('user_id', user.id);
+
+        if (error) {
+            console.error("Error fetching contacts", error);
+            setContacts(defaultContacts);
+        } else {
+            setContacts(data.length > 0 ? data : defaultContacts);
+        }
+        setLoading(false);
     };
 
-    const handleAddContact = (e: React.FormEvent) => {
+    useEffect(() => {
+        fetchContacts();
+    }, [user]);
+
+    const handleAddContact = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newName || !newPhone) return;
 
-        const newContact: Contact = {
-            id: Date.now().toString(),
-            name: newName,
-            phone: newPhone,
-            priority: newPriority,
-        };
+        if (!user) {
+            toast.error("You must be logged in to save real contacts.");
+            return;
+        }
 
-        saveContacts([...contacts, newContact]);
-        setIsAdding(false);
-        setNewName("");
-        setNewPhone("");
-        setNewPriority("Medium");
+        const { data, error } = await supabase
+            .from('contacts')
+            .insert([
+                { 
+                    user_id: user.id, 
+                    name: newName, 
+                    phone: newPhone, 
+                    priority: newPriority 
+                }
+            ])
+            .select();
+
+        if (error) {
+            toast.error("Failed to save contact.");
+            console.error(error);
+        } else {
+            setContacts([...contacts.filter(c => c.id !== "1" && c.id !== "2"), data[0]]);
+            setIsAdding(false);
+            setNewName("");
+            setNewPhone("");
+            setNewPriority("Medium");
+            toast.success("Contact saved securely to database!");
+        }
     };
 
-    const handleDeleteContact = (id: string) => {
-        const filtered = contacts.filter(c => c.id !== id);
-        saveContacts(filtered);
+    const handleDeleteContact = async (id: string) => {
+        if (id === "1" || id === "2") {
+            setContacts(contacts.filter(c => c.id !== id));
+            return;
+        }
+
+        const { error } = await supabase
+            .from('contacts')
+            .delete()
+            .eq('id', id);
+
+        if (error) {
+            toast.error("Failed to delete contact.");
+        } else {
+            setContacts(contacts.filter(c => c.id !== id));
+            toast.success("Contact removed from cloud database.");
+        }
     };
 
     const simulateNotify = (c: Contact) => {
         setNotifying(c.id);
         setTimeout(() => setNotifying(null), 2000);
+    };
+
+    const handleWhatsApp = (c: Contact) => {
+        simulateNotify(c);
+        const cleanPhone = c.phone.replace(/\D/g, "");
+        window.open(`https://wa.me/${cleanPhone}?text=This%20is%20a%20test%20alert%20from%20SHERO%20Safety%20System.`, "_blank");
+    };
+
+    const handleSMS = (c: Contact) => {
+        simulateNotify(c);
+        const cleanPhone = c.phone.replace(/\D/g, "");
+        window.location.href = `sms:${cleanPhone}?body=This%20is%20a%20test%20alert%20from%20SHERO%20Safety%20System.`;
+    };
+
+    const handleCall = (c: Contact) => {
+        simulateNotify(c);
+        const cleanPhone = c.phone.replace(/\D/g, "");
+        window.location.href = `tel:${cleanPhone}`;
     };
 
     return (
@@ -146,6 +216,15 @@ const Contacts = () => {
                 </AnimatePresence>
 
                 <div className="space-y-4">
+                    {loading && (
+                        <div className="flex justify-center p-12">
+                            <motion.div
+                                animate={{ rotate: 360 }}
+                                transition={{ repeat: Infinity, duration: 1 }}
+                                className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full"
+                            />
+                        </div>
+                    )}
                     <AnimatePresence>
                         {contacts.map((contact, i) => (
                             <motion.div
@@ -174,7 +253,7 @@ const Contacts = () => {
                                             {contact.name}
                                             {contact.priority === "High" && <Star className="h-4 w-4 text-warning fill-warning" />}
                                         </h3>
-                                        <p className="text-sm text-muted-foreground">{contact.phone}</p>
+                                        <p className="text-sm text-muted-foreground font-mono">{contact.phone}</p>
                                         <div className="mt-1">
                                             <PriorityBadge priority={contact.priority} />
                                         </div>
@@ -183,21 +262,21 @@ const Contacts = () => {
 
                                 <div className="flex gap-2">
                                     <button
-                                        onClick={() => simulateNotify(contact)}
+                                        onClick={() => handleWhatsApp(contact)}
                                         className="p-3 bg-secondary rounded-xl hover:bg-green-500/20 hover:text-green-500 transition tooltip-container relative group"
                                     >
                                         <MessageCircle className="h-5 w-5" />
                                         <span className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs bg-black text-white px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition whitespace-nowrap">Test WhatsApp</span>
                                     </button>
                                     <button
-                                        onClick={() => simulateNotify(contact)}
+                                        onClick={() => handleSMS(contact)}
                                         className="p-3 bg-secondary rounded-xl hover:bg-blue-500/20 hover:text-blue-500 transition tooltip-container relative group"
                                     >
                                         <Smartphone className="h-5 w-5" />
                                         <span className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs bg-black text-white px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition whitespace-nowrap">Test SMS</span>
                                     </button>
                                     <button
-                                        onClick={() => simulateNotify(contact)}
+                                        onClick={() => handleCall(contact)}
                                         className="p-3 bg-secondary rounded-xl hover:bg-primary/20 hover:text-primary transition tooltip-container relative group"
                                     >
                                         <Phone className="h-5 w-5" />

@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
+import { supabase } from "@/lib/supabase";
 
 interface User {
     id: string;
@@ -11,9 +12,9 @@ interface User {
 interface AuthContextType {
     user: User | null;
     loading: boolean;
-    signUp: (email: string, password: string, fullName: string, pin: string) => User;
-    signIn: (email: string, password: string) => User;
-    signOut: () => void;
+    signUp: (email: string, password: string, fullName: string, pin: string) => Promise<any>;
+    signIn: (email: string, password: string) => Promise<any>;
+    signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -23,77 +24,68 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        const stored = localStorage.getItem("shero-user");
-        if (stored) {
-            try {
-                setUser(JSON.parse(stored));
-            } catch (e) {
-                console.error("Failed to parse user session", e);
+        // Check active session on mount
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            if (session?.user) {
+                setUser({
+                    id: session.user.id,
+                    email: session.user.email!,
+                    fullName: session.user.user_metadata.fullName || "User",
+                    pin: session.user.user_metadata.pin || "0000",
+                    createdAt: session.user.created_at,
+                });
             }
-        }
-        setLoading(false);
+            setLoading(false);
+        });
+
+        // Listen for auth changes
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            if (session?.user) {
+                setUser({
+                    id: session.user.id,
+                    email: session.user.email!,
+                    fullName: session.user.user_metadata.fullName || "User",
+                    pin: session.user.user_metadata.pin || "0000",
+                    createdAt: session.user.created_at,
+                });
+            } else {
+                setUser(null);
+            }
+            setLoading(false);
+        });
+
+        return () => subscription.unsubscribe();
     }, []);
 
-    const signUp = useCallback((email: string, password: string, fullName: string, pin: string) => {
-        const users: Record<string, { password: string; user: User }> = JSON.parse(
-            localStorage.getItem("shero-users") || "{}"
-        );
-        if (users[email]) {
-            throw new Error("An account with this email already exists");
-        }
-        const newUser: User = {
-            id: crypto.randomUUID(),
+    const signUp = useCallback(async (email: string, password: string, fullName: string, pin: string) => {
+        const { data, error } = await supabase.auth.signUp({
             email,
-            fullName,
-            pin,
-            createdAt: new Date().toISOString(),
-        };
-        users[email] = { password, user: newUser };
-        // Temporarily save users and current user in localStorage for persistence across sessions
-        localStorage.setItem("shero-users", JSON.stringify(users));
-        localStorage.setItem("shero-user", JSON.stringify(newUser));
-        setUser(newUser);
-        return newUser;
+            password,
+            options: {
+                data: {
+                    fullName,
+                    pin
+                }
+            }
+        });
+
+        if (error) throw error;
+        return data.user;
     }, []);
 
-    const signIn = useCallback((email: string, password: string) => {
-        const users: Record<string, { password: string; user: User }> = JSON.parse(
-            localStorage.getItem("shero-users") || "{}"
-        );
+    const signIn = useCallback(async (email: string, password: string) => {
+        const { data, error } = await supabase.auth.signInWithPassword({
+            email,
+            password,
+        });
 
-        // Provide a mocked fallback for demo face login if user@demo.com is used
-        if (email === "user@demo.com" && password === "password") {
-            const mockUser = {
-                id: "mock123", email, fullName: "Demo User", pin: "1234", createdAt: new Date().toISOString()
-            };
-            localStorage.setItem("shero-user", JSON.stringify(mockUser));
-            setUser(mockUser);
-            return mockUser;
-        }
-
-        // Provide a mocked fallback for admin login
-        if (email === "admin@shero.com" && password === "password") {
-            const adminUser = {
-                id: "admin123", email, fullName: "Admin Chief", pin: "0000", createdAt: new Date().toISOString()
-            };
-            localStorage.setItem("shero-user", JSON.stringify(adminUser));
-            setUser(adminUser);
-            return adminUser;
-        }
-
-        const record = users[email];
-        if (!record || record.password !== password) {
-            throw new Error("Invalid email or password");
-        }
-
-        // Temporarily save the session credentials
-        localStorage.setItem("shero-user", JSON.stringify(record.user));
-        setUser(record.user);
-        return record.user;
+        if (error) throw error;
+        return data.user;
     }, []);
 
-    const signOut = useCallback(() => {
-        localStorage.removeItem("shero-user");
+    const signOut = useCallback(async () => {
+        const { error } = await supabase.auth.signOut();
+        if (error) console.error("Sign out error", error);
         setUser(null);
     }, []);
 

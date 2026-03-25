@@ -16,7 +16,7 @@ const Auth = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       if (isSignUp) {
@@ -24,10 +24,10 @@ const Auth = () => {
           toast({ title: "Invalid PIN", description: "Please enter a 4-digit PIN", variant: "destructive" });
           return;
         }
-        signUp(email, password, fullName, pin);
+        await signUp(email, password, fullName, pin);
         toast({ title: "Welcome to Shero!", description: "Your account has been created." });
       } else {
-        signIn(email, password);
+        await signIn(email, password);
         toast({ title: "Welcome back!", description: "You've signed in successfully." });
       }
       navigate("/dashboard");

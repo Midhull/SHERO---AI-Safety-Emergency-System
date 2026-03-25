@@ -12,12 +12,17 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
 
+import { toast } from "sonner";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/hooks/useAuth";
+
 const LiveTracking = () => {
+    const { user } = useAuth();
     const [position, setPosition] = useState<{ lat: number, lng: number } | null>(null);
     const [route, setRoute] = useState<{ lat: number, lng: number }[]>([]);
     const [locating, setLocating] = useState(true);
 
-    const safeZones = useRef<any[]>([]);
+    const [safeZones, setSafeZones] = useState<any[]>([]);
     const [activeZoneName, setActiveZoneName] = useState("AI Analyzing...");
     const [activeZoneCoords, setActiveZoneCoords] = useState<{ lat: number, lng: number } | null>(null);
     const [showAssistant, setShowAssistant] = useState(false);
@@ -28,23 +33,138 @@ const LiveTracking = () => {
     const routePolyline = useRef<L.Polyline | null>(null);
     const safeZonePolyline = useRef<L.Polyline | null>(null);
     const userMarker = useRef<L.Marker | null>(null);
+    const safeZoneMarkers = useRef<L.LayerGroup | null>(null);
 
-    const initializeZones = (pos: { lat: number, lng: number }) => {
-        const foundZones = [
-            { name: "City Hospital (Fallback)", pos: { lat: pos.lat + 0.004, lng: pos.lng - 0.003 }, type: "hospital", distance: 0.8 },
-            { name: "Precinct 12 (Fallback)", pos: { lat: pos.lat - 0.003, lng: pos.lng + 0.004 }, type: "police", distance: 1.2 },
-        ];
-        safeZones.current = foundZones;
-        setActiveZoneName(foundZones[0].name);
-        setActiveZoneCoords(foundZones[0].pos);
-        
-        if (mapInstance.current) {
-            drawSafeZones(foundZones);
+    const handleShareLocation = async () => {
+        if (!position) {
+            toast.error("GPS signal not acquired. Please wait.");
+            return;
+        }
+
+        const shareUrl = `${window.location.origin}/live-tracking?lat=${position.lat}&lng=${position.lng}&shared=true`;
+        const shareData = {
+            title: 'SHERO Live Safety Tracking',
+            text: `Follow my live location for safety:`,
+            url: shareUrl
+        };
+
+        try {
+            if (navigator.share) {
+                await navigator.share(shareData);
+                toast.success("Live tracking active and shared!");
+            } else {
+                await navigator.clipboard.writeText(`${shareData.text} ${shareUrl}`);
+                toast.success("Tracking link copied to clipboard! Send it to your emergency contacts.");
+            }
+        } catch (err) {
+            if ((err as Error).name !== 'AbortError') {
+                toast.error("Sharing failed. Please try copying the link manually.");
+            }
         }
     };
 
-    const drawSafeZones = (zones: any[]) => {
+    // Haversine formula for real-time distance calculation
+    const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+        const R = 6371; // Radius of the earth in km
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = 
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c; // Distance in km
+    };
+
+    // Fetch real-time data from OpenStreetMap (Overpass API)
+    const fetchRealSafeZones = async (lat: number, lng: number) => {
+        try {
+            // Search for hospitals and police stations within 3000 meters
+            const radius = 3000;
+            const query = `
+                [out:json];
+                (
+                  node["amenity"="hospital"](around:${radius},${lat},${lng});
+                  node["amenity"="police"](around:${radius},${lat},${lng});
+                  node["emergency"="rescue_station"](around:${radius},${lat},${lng});
+                );
+                out body;
+            `;
+            
+            const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+            const data = await response.json();
+            
+            if (data.elements && data.elements.length > 0) {
+                const realZones = data.elements.map((el: any) => {
+                    const zoneLat = el.lat;
+                    const zoneLng = el.lon;
+                    const name = el.tags.name || (el.tags.amenity === 'police' ? "Local Police Station" : "Emergency Care Center");
+                    
+                    return {
+                        id: el.id,
+                        name: name,
+                        pos: { lat: zoneLat, lng: zoneLng },
+                        type: el.tags.amenity || "emergency",
+                        distance: getDistance(lat, lng, zoneLat, zoneLng)
+                    };
+                }).sort((a: any, b: any) => a.distance - b.distance);
+                
+                setSafeZones(realZones.slice(0, 5)); // Top 5 nearest
+                
+                if (realZones.length > 0) {
+                    setActiveZoneName(realZones[0].name);
+                    setActiveZoneCoords(realZones[0].pos);
+                    if (mapInstance.current) {
+                        drawSafeZoneMarkers(realZones.slice(0, 5));
+                    }
+                }
+            } else {
+                console.warn("No real-world safe zones found in immediate area. Falling back to simulation.");
+                // Fallback if API returns empty (e.g. user in a remote area)
+                initializeMockZones({ lat, lng });
+            }
+        } catch (error) {
+            console.error("Error fetching Overpass data:", error);
+            initializeMockZones({ lat, lng });
+        }
+    };
+
+    const initializeMockZones = (pos: { lat: number, lng: number }) => {
+        const initialZones = [
+            { id: 101, name: "Simulation: City Health Terminal", latOffset: 0.005, lngOffset: -0.004, type: "hospital" },
+            { id: 102, name: "Simulation: Security Node 12", latOffset: -0.004, lngOffset: 0.006, type: "police" },
+        ].map(zone => {
+            const lat = pos.lat + zone.latOffset;
+            const lng = pos.lng + zone.lngOffset;
+            return {
+                ...zone,
+                pos: { lat, lng },
+                distance: getDistance(pos.lat, pos.lng, lat, lng)
+            };
+        });
+
+        const sortedZones = initialZones.sort((a, b) => a.distance - b.distance);
+        setSafeZones(sortedZones);
+        setActiveZoneName(sortedZones[0].name);
+        setActiveZoneCoords(sortedZones[0].pos);
+        if (mapInstance.current) {
+            drawSafeZoneMarkers(sortedZones);
+        }
+    };
+
+    const initializeZones = (pos: { lat: number, lng: number }) => {
+        fetchRealSafeZones(pos.lat, pos.lng);
+    };
+
+    const drawSafeZoneMarkers = (zones: any[]) => {
         if (!mapInstance.current) return;
+        
+        // Clear existing markers if group exists
+        if (safeZoneMarkers.current) {
+            safeZoneMarkers.current.clearLayers();
+        } else {
+            safeZoneMarkers.current = L.layerGroup().addTo(mapInstance.current);
+        }
         
         zones.forEach(zone => {
             const circle = L.circle([zone.pos.lat, zone.pos.lng], {
@@ -60,22 +180,54 @@ const LiveTracking = () => {
                     🛡️ ${zone.name}
                 </div>
                 <div style="color: #666; font-size: 11px; margin-top: 2px;">
-                    ${zone.type.toUpperCase()}
+                    ${zone.type.toUpperCase()} • ${(zone.distance).toFixed(2)} km
                 </div>
             `);
             
-            circle.addTo(mapInstance.current!);
+            circle.addTo(safeZoneMarkers.current!);
         });
     };
 
-    const setRouteToZone = (index: number) => {
-        if (safeZones.current.length === 0 || !position) return;
-        setActiveZoneName(safeZones.current[index].name);
-        setActiveZoneCoords(safeZones.current[index].pos);
+    const setRouteToZone = (zone: any) => {
+        setActiveZoneName(zone.name);
+        setActiveZoneCoords(zone.pos);
     };
 
-    // Watch real location
+    // Update distances whenever position changes
     useEffect(() => {
+        if (position && safeZones.length > 0) {
+            setSafeZones(prev => {
+                const updated = prev.map(zone => ({
+                    ...zone,
+                    distance: getDistance(position.lat, position.lng, zone.pos.lat, zone.pos.lng)
+                })).sort((a, b) => a.distance - b.distance);
+                
+                // If the map is ready, we might want to refresh popup content, but drawSafeZoneMarkers 
+                // is expensive to run on every tiny movement. We only redraw if markers change significantly.
+                return updated;
+            });
+        }
+    }, [position]);
+
+    // Watch real location or load shared location
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const sharedLat = params.get('lat');
+        const sharedLng = params.get('lng');
+        const isShared = params.get('shared') === 'true';
+
+        if (isShared && sharedLat && sharedLng) {
+            const sharedPos = { lat: parseFloat(sharedLat), lng: parseFloat(sharedLng) };
+            setPosition(sharedPos);
+            setRoute([sharedPos]);
+            setLocating(false);
+            initializeZones(sharedPos);
+            toast.info("Viewing shared live location", {
+                description: "This link shows the location shared by your contact."
+            });
+            return; // Don't start tracking if we are just a viewer
+        }
+
         if (!navigator.geolocation) {
             const fallback = { lat: 40.7128, lng: -74.0060 };
             setPosition(fallback);
@@ -86,7 +238,7 @@ const LiveTracking = () => {
         }
 
         const watchId = navigator.geolocation.watchPosition(
-            (pos) => {
+            async (pos) => {
                 const newPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
                 setPosition(prev => {
                     if (!prev) initializeZones(newPos);
@@ -98,6 +250,19 @@ const LiveTracking = () => {
                     if (last && last.lat === newPos.lat && last.lng === newPos.lng) return prevRoute;
                     return [...prevRoute, newPos];
                 });
+
+                // Broadcast to Supabase for real-time tracking
+                if (user) {
+                    await supabase
+                        .from('incidents')
+                        .upsert({ 
+                            user_id: user.id,
+                            lat: newPos.lat,
+                            lng: newPos.lng,
+                            status: 'active',
+                            updated_at: new Date().toISOString()
+                        }, { onConflict: 'user_id' });
+                }
             },
             (err) => {
                 console.error("Error getting location:", err);
@@ -142,11 +307,11 @@ const LiveTracking = () => {
                 userMarker.current = L.marker([position.lat, position.lng], { icon: customIcon }).addTo(mapInstance.current);
                 userMarker.current.bindPopup("You are here");
                 
-                drawSafeZones(safeZones.current);
+                if (safeZones.length > 0) {
+                    drawSafeZoneMarkers(safeZones);
+                }
             } else {
-                // Update map
-                mapInstance.current.setView([position.lat, position.lng]);
-                
+                // Smoothly update user position
                 if (userMarker.current) {
                     userMarker.current.setLatLng([position.lat, position.lng]);
                 }
@@ -209,6 +374,7 @@ const LiveTracking = () => {
                         <p className="text-muted-foreground mt-1">Real-time GPS with AI safest route suggestions.</p>
                     </motion.div>
                     <motion.button
+                        onClick={handleShareLocation}
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
                         className="hidden md:flex bg-primary/20 text-primary px-4 py-2 rounded-xl items-center gap-2 hover:bg-primary hover:text-white transition-colors border border-primary/30"
@@ -268,13 +434,13 @@ const LiveTracking = () => {
                                     </button>
                                 </div>
                                 <div className="flex flex-col gap-2">
-                                    <p className="text-sm font-medium mb-1">I found {safeZones.current.length} verified safe locations nearby. Sorted by nearest to your live position:</p>
+                                    <p className="text-sm font-medium mb-1">I found {safeZones.length} verified safe locations nearby. Sorted by nearest to your live position:</p>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                        {safeZones.current.map((zone, idx) => (
+                                        {safeZones.map((zone, idx) => (
                                             <button
-                                                key={idx}
+                                                key={zone.id}
                                                 onClick={() => {
-                                                    setRouteToZone(idx);
+                                                    setRouteToZone(zone);
                                                     setShowAssistant(false);
                                                 }}
                                                 className="text-left px-4 py-3 bg-background/50 hover:bg-white/10 border border-white/5 rounded-xl transition flex items-center justify-between group"
@@ -285,7 +451,7 @@ const LiveTracking = () => {
                                                         {zone.name}
                                                     </span>
                                                     <span className="text-xs text-muted-foreground ml-6 capitalize font-mono">
-                                                        {zone.distance ? `${zone.distance.toFixed(2)} km away` : zone.type}
+                                                        {zone.distance.toFixed(2)} km away
                                                     </span>
                                                 </div>
                                                 <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-white transition" />
@@ -318,7 +484,10 @@ const LiveTracking = () => {
                         )}
                     </div>
 
-                    <div className="glass p-5 rounded-2xl flex items-center gap-4 cursor-pointer hover:bg-white/5 transition md:col-span-1">
+                    <div 
+                        onClick={handleShareLocation}
+                        className="glass p-5 rounded-2xl flex items-center gap-4 cursor-pointer hover:bg-white/5 transition md:col-span-1"
+                    >
                         <div className="p-3 bg-primary/20 rounded-xl text-primary">
                             <Share2 className="h-6 w-6" />
                         </div>

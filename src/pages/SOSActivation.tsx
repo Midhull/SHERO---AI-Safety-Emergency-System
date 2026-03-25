@@ -1,17 +1,45 @@
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Mic, Video, MapPin, ShieldAlert, CheckCircle2, PhoneCall, AlertTriangle } from "lucide-react";
+import { Mic, Video, MapPin, ShieldAlert, CheckCircle2, PhoneCall, AlertTriangle, ChevronRight, X, Activity, Navigation, Share2, LocateFixed, History, ShieldCheck, MessageSquare } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import MiniMap from "@/components/MiniMap";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/hooks/useAuth";
+import { toast } from "sonner";
 
 const SOSActivation = () => {
+    const { user } = useAuth();
     const navigate = useNavigate();
     const [status, setStatus] = useState("initiating"); // initiating, active, cancelled
 
+    const broadcastSOS = async () => {
+        if (!user) return;
+        
+        const { error } = await supabase
+            .from('incidents')
+            .upsert({ 
+                user_id: user.id,
+                status: 'active',
+                is_emergency: true,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'user_id' });
+
+        if (error) {
+            console.error("SOS Broadcast Error:", error);
+            toast.error("Cloud broadcast failed. Local alerts active.");
+        }
+    };
+
+    const resolveSOS = async () => {
+        if (!user) return;
+        await supabase
+            .from('incidents')
+            .update({ status: 'resolved', is_emergency: false })
+            .eq('user_id', user.id);
+    };
+
     useEffect(() => {
-        // Broadcast SOS Alert via localStorage for real-time syncing
-        localStorage.setItem("shero_active_sos", JSON.stringify({ active: true, time: new Date().toISOString() }));
-        window.dispatchEvent(new Event("storage"));
+        broadcastSOS();
 
         // Sequence of events
         const seq = async () => {
@@ -19,17 +47,18 @@ const SOSActivation = () => {
             setStatus("active");
         };
         seq();
-    }, []);
+    }, [user]);
 
-    const handleCancel = () => {
-        const input = window.prompt("Enter PIN to cancel SOS:");
-        if (input === "1234") { // Mock PIN
-            localStorage.removeItem("shero_active_sos");
-            window.dispatchEvent(new Event("storage"));
+    const handleCancel = async () => {
+        const input = window.prompt("Enter your 4-digit Safety PIN to cancel SOS:");
+        // Use user's real PIN from database, or fallback to the one in context
+        if (input === (user?.pin || "1234")) { 
+            await resolveSOS();
             setStatus("cancelled");
+            toast.success("SOS Protocol Resolved");
             setTimeout(() => navigate("/dashboard"), 2000);
         } else if (input) {
-            alert("Incorrect PIN!");
+            toast.error("Incorrect Safety PIN! Alert escalation continues.");
         }
     };
 
@@ -42,8 +71,8 @@ const SOSActivation = () => {
                     className="glass-strong p-8 rounded-3xl text-center max-w-sm w-full"
                 >
                     <CheckCircle2 className="h-16 w-16 text-safe mx-auto mb-4" />
-                    <h2 className="font-display text-2xl font-bold mb-2">SOS Cancelled</h2>
-                    <p className="text-muted-foreground">Returning to dashboard...</p>
+                    <h2 className="font-display text-2xl font-bold mb-2">SOS Resolved</h2>
+                    <p className="text-muted-foreground">Emergency protocol terminated.</p>
                 </motion.div>
             </div>
         );
